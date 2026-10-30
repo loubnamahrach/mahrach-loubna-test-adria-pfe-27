@@ -1,3 +1,22 @@
+server:
+  port: 8082
+
 spring:
   application:
     name: transaction-service
+  datasource:
+    url: ${TRANSACTION_DB_URL:jdbc:postgresql://localhost:5432/transactiondb}
+    username: ${TRANSACTION_DB_USER:bank}
+    password: ${TRANSACTION_DB_PASSWORD:}
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+
+bank:
+  transaction:
+    max-amount: 1000
+
+clients:
+  account-service:
+    url: ${ACCOUNT_SERVICE_URL:http://localhost:8081}
