@@ -2,12 +2,21 @@ package ma.enset.bank.transaction.service;
 
 import feign.FeignException;
 import feign.RetryableException;
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
+import io.github.resilience4j.retry.Retry;
+import io.github.resilience4j.retry.RetryConfig;
+import io.github.resilience4j.retry.RetryRegistry;
 import java.math.BigDecimal;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.Supplier;
 import ma.enset.bank.transaction.client.AccountClient;
 import ma.enset.bank.transaction.client.AccountView;
 import ma.enset.bank.transaction.client.AmountPayload;
@@ -34,6 +43,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 /**
  * Point d'entree unique des regles metier des transactions et virements (REST, GraphQL et MCP).
+ * Protege les appels vers Account-Service par CircuitBreaker et Retry Resilience4J en mode Fail-Closed.
  */
 @Service
 public class TransactionService {
@@ -46,20 +56,55 @@ public class TransactionService {
     private final AccountClient accountClient;
     private final BankTransactionProperties properties;
     private final Clock clock;
+    private final CircuitBreaker circuitBreaker;
+    private final Retry readRetry;
 
     public TransactionService(TransactionRepository repository, AccountClient accountClient,
                               BankTransactionProperties properties, Clock clock) {
-        this(repository, null, accountClient, properties, clock);
+        this(repository, null, accountClient, properties, clock, defaultCircuitBreaker(), defaultRetry());
+    }
+
+    public TransactionService(TransactionRepository repository, TransferRecordRepository transferRepository,
+                              AccountClient accountClient, BankTransactionProperties properties, Clock clock) {
+        this(repository, transferRepository, accountClient, properties, clock, defaultCircuitBreaker(), defaultRetry());
     }
 
     @Autowired
     public TransactionService(TransactionRepository repository, TransferRecordRepository transferRepository,
-                              AccountClient accountClient, BankTransactionProperties properties, Clock clock) {
+                              AccountClient accountClient, BankTransactionProperties properties, Clock clock,
+                              CircuitBreakerRegistry circuitBreakerRegistry, RetryRegistry retryRegistry) {
+        this(repository, transferRepository, accountClient, properties, clock,
+                circuitBreakerRegistry.circuitBreaker("accountService"),
+                retryRegistry.retry("accountServiceRead"));
+    }
+
+    public TransactionService(TransactionRepository repository, TransferRecordRepository transferRepository,
+                              AccountClient accountClient, BankTransactionProperties properties, Clock clock,
+                              CircuitBreaker circuitBreaker, Retry readRetry) {
         this.repository = repository;
         this.transferRepository = transferRepository;
         this.accountClient = accountClient;
         this.properties = properties;
         this.clock = clock;
+        this.circuitBreaker = circuitBreaker;
+        this.readRetry = readRetry;
+    }
+
+    private static CircuitBreaker defaultCircuitBreaker() {
+        return CircuitBreaker.of("accountService", CircuitBreakerConfig.custom()
+                .slidingWindowSize(4)
+                .minimumNumberOfCalls(4)
+                .failureRateThreshold(50.0f)
+                .waitDurationInOpenState(Duration.ofSeconds(5))
+                .permittedNumberOfCallsInHalfOpenState(2)
+                .ignoreExceptions(TransactionRuleException.class)
+                .build());
+    }
+
+    private static Retry defaultRetry() {
+        return Retry.of("accountServiceRead", RetryConfig.custom()
+                .maxAttempts(1)
+                .build());
     }
 
     @Transactional
@@ -82,10 +127,6 @@ public class TransactionService {
         return TransactionResponse.from(saved);
     }
 
-    /**
-     * Virement inter-comptes orchestre par Saga avec compensation et cle d'idempotence.
-     * Aucune transaction ACID globale n'est supposee entre les deux bases de donnees.
-     */
     @Transactional(noRollbackFor = TransferCompensationException.class)
     public TransferResponse transfer(TransferRequest request) {
         if (request.sourceAccountId().equals(request.targetAccountId())) {
@@ -209,18 +250,27 @@ public class TransactionService {
     }
 
     private AccountView fetchAccount(UUID accountId) {
-        return callAccountService(() -> accountClient.getAccount(accountId));
+        Supplier<AccountView> supplier = Retry.decorateSupplier(readRetry,
+                () -> callAccountService(() -> accountClient.getAccount(accountId)));
+        return supplier.get();
     }
 
-    private <T> T callAccountService(java.util.function.Supplier<T> call) {
+    private <T> T callAccountService(Supplier<T> call) {
         try {
-            return call.get();
-        } catch (TransactionRuleException e) {
-            throw e;
-        } catch (RetryableException e) {
-            throw new AccountServiceUnavailableException("Account-Service is unreachable", e);
-        } catch (FeignException e) {
-            throw new AccountServiceUnavailableException("Account-Service call failed", e);
+            return circuitBreaker.executeSupplier(() -> {
+                try {
+                    return call.get();
+                } catch (TransactionRuleException e) {
+                    throw e;
+                } catch (RetryableException e) {
+                    throw new AccountServiceUnavailableException("Account-Service timeout or unreachable", e);
+                } catch (FeignException e) {
+                    throw new AccountServiceUnavailableException("Account-Service communication error", e);
+                }
+            });
+        } catch (CallNotPermittedException e) {
+            throw new AccountServiceUnavailableException(
+                    "Circuit breaker 'accountService' is OPEN; transaction refused (fail-closed)", e);
         }
     }
 }

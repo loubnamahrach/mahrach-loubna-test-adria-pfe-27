@@ -4,6 +4,8 @@ server:
 spring:
   application:
     name: account-service
+  config:
+    import: optional:configserver:${CONFIG_SERVER_URL:http://localhost:8888}
   datasource:
     url: ${ACCOUNT_DB_URL:jdbc:h2:mem:accountdb;MODE=PostgreSQL;DB_CLOSE_DELAY=-1}
     username: ${ACCOUNT_DB_USER:bank}
@@ -21,3 +23,9 @@ spring:
   graphql:
     graphiql:
       enabled: true
+
+eureka:
+  client:
+    enabled: ${EUREKA_ENABLED:false}
+    service-url:
+      defaultZone: ${EUREKA_SERVER_URL:http://localhost:8761/eureka/}
