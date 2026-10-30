@@ -4,6 +4,7 @@ import java.util.stream.Collectors;
 import ma.enset.bank.transaction.service.exception.AccountServiceUnavailableException;
 import ma.enset.bank.transaction.service.exception.TransactionNotFoundException;
 import ma.enset.bank.transaction.service.exception.TransactionRuleException;
+import ma.enset.bank.transaction.service.exception.TransferCompensationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -18,13 +19,20 @@ public class RestExceptionHandler {
     @ExceptionHandler(TransactionRuleException.class)
     ProblemDetail rule(TransactionRuleException e) {
         HttpStatus status = switch (e.getViolation()) {
-            case INVALID_AMOUNT -> HttpStatus.BAD_REQUEST;
+            case INVALID_AMOUNT, SAME_ACCOUNT_TRANSFER -> HttpStatus.BAD_REQUEST;
             case ACCOUNT_NOT_FOUND -> HttpStatus.NOT_FOUND;
-            case ACCOUNT_NOT_ACTIVE -> HttpStatus.CONFLICT;
+            case ACCOUNT_NOT_ACTIVE, IDEMPOTENCY_CONFLICT -> HttpStatus.CONFLICT;
             case AMOUNT_LIMIT_EXCEEDED, CURRENCY_MISMATCH, INSUFFICIENT_FUNDS -> HttpStatus.UNPROCESSABLE_ENTITY;
         };
         ProblemDetail problem = ProblemDetail.forStatusAndDetail(status, e.getMessage());
         problem.setProperty("violation", e.getViolation().name());
+        return problem;
+    }
+
+    @ExceptionHandler(TransferCompensationException.class)
+    ProblemDetail transferCompensated(TransferCompensationException e) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.SERVICE_UNAVAILABLE, e.getMessage());
+        problem.setProperty("transferStatus", e.getStatus().name());
         return problem;
     }
 

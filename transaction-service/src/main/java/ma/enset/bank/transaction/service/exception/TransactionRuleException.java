@@ -8,7 +8,9 @@ public class TransactionRuleException extends RuntimeException {
         ACCOUNT_NOT_FOUND,
         ACCOUNT_NOT_ACTIVE,
         CURRENCY_MISMATCH,
-        INSUFFICIENT_FUNDS
+        INSUFFICIENT_FUNDS,
+        SAME_ACCOUNT_TRANSFER,
+        IDEMPOTENCY_CONFLICT
     }
 
     private final Violation violation;

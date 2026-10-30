@@ -5,7 +5,7 @@ spring:
   application:
     name: transaction-service
   datasource:
-    url: ${TRANSACTION_DB_URL:jdbc:postgresql://localhost:5432/transactiondb}
+    url: ${TRANSACTION_DB_URL:jdbc:h2:mem:transactiondb;MODE=PostgreSQL;DB_CLOSE_DELAY=-1}
     username: ${TRANSACTION_DB_USER:bank}
     password: ${TRANSACTION_DB_PASSWORD:}
   jpa:

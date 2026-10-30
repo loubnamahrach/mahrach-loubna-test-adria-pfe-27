@@ -5,7 +5,7 @@ spring:
   application:
     name: account-service
   datasource:
-    url: ${ACCOUNT_DB_URL:jdbc:postgresql://localhost:5432/accountdb}
+    url: ${ACCOUNT_DB_URL:jdbc:h2:mem:accountdb;MODE=PostgreSQL;DB_CLOSE_DELAY=-1}
     username: ${ACCOUNT_DB_USER:bank}
     password: ${ACCOUNT_DB_PASSWORD:}
   jpa:

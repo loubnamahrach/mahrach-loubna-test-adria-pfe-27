@@ -6,48 +6,62 @@ import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import ma.enset.bank.transaction.client.AccountClient;
 import ma.enset.bank.transaction.client.AccountView;
 import ma.enset.bank.transaction.client.AmountPayload;
 import ma.enset.bank.transaction.config.BankTransactionProperties;
 import ma.enset.bank.transaction.domain.Transaction;
+import ma.enset.bank.transaction.domain.TransferRecord;
+import ma.enset.bank.transaction.domain.TransferStatus;
 import ma.enset.bank.transaction.dto.CreateTransactionRequest;
 import ma.enset.bank.transaction.dto.TransactionResponse;
+import ma.enset.bank.transaction.dto.TransferRequest;
+import ma.enset.bank.transaction.dto.TransferResponse;
 import ma.enset.bank.transaction.repository.TransactionRepository;
+import ma.enset.bank.transaction.repository.TransferRecordRepository;
 import ma.enset.bank.transaction.service.exception.AccountServiceUnavailableException;
 import ma.enset.bank.transaction.service.exception.TransactionNotFoundException;
 import ma.enset.bank.transaction.service.exception.TransactionRuleException;
 import ma.enset.bank.transaction.service.exception.TransactionRuleException.Violation;
+import ma.enset.bank.transaction.service.exception.TransferCompensationException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * Point d'entree unique des regles metier des transactions (REST, GraphQL et MCP).
- * Une transaction enregistree represente un debit du compte.
+ * Point d'entree unique des regles metier des transactions et virements (REST, GraphQL et MCP).
  */
 @Service
 public class TransactionService {
 
+    private static final Logger log = LoggerFactory.getLogger(TransactionService.class);
     private static final int MONEY_SCALE = 2;
 
     private final TransactionRepository repository;
+    private final TransferRecordRepository transferRepository;
     private final AccountClient accountClient;
     private final BankTransactionProperties properties;
     private final Clock clock;
 
     public TransactionService(TransactionRepository repository, AccountClient accountClient,
                               BankTransactionProperties properties, Clock clock) {
+        this(repository, null, accountClient, properties, clock);
+    }
+
+    @Autowired
+    public TransactionService(TransactionRepository repository, TransferRecordRepository transferRepository,
+                              AccountClient accountClient, BankTransactionProperties properties, Clock clock) {
         this.repository = repository;
+        this.transferRepository = transferRepository;
         this.accountClient = accountClient;
         this.properties = properties;
         this.clock = clock;
     }
 
-    /**
-     * Si le debit echoue apres l'enregistrement, l'exception annule la transaction locale (rollback).
-     * Un echec du commit local apres un debit reussi ne peut pas etre annule : cette limite est documentee.
-     */
     @Transactional
     public TransactionResponse record(CreateTransactionRequest request) {
         BigDecimal amount = validateAmount(request.amount());
@@ -66,6 +80,100 @@ public class TransactionService {
                 request.merchantCategory(), request.country(), Instant.now(clock)));
         callAccountService(() -> accountClient.debit(account.id(), new AmountPayload(amount)));
         return TransactionResponse.from(saved);
+    }
+
+    /**
+     * Virement inter-comptes orchestre par Saga avec compensation et cle d'idempotence.
+     * Aucune transaction ACID globale n'est supposee entre les deux bases de donnees.
+     */
+    @Transactional(noRollbackFor = TransferCompensationException.class)
+    public TransferResponse transfer(TransferRequest request) {
+        if (request.sourceAccountId().equals(request.targetAccountId())) {
+            throw new TransactionRuleException(Violation.SAME_ACCOUNT_TRANSFER,
+                    "Source and target accounts must be different");
+        }
+        BigDecimal amount = validateAmount(request.amount());
+        String key = (request.idempotencyKey() == null || request.idempotencyKey().isBlank())
+                ? UUID.randomUUID().toString()
+                : request.idempotencyKey().trim();
+
+        if (transferRepository != null) {
+            Optional<TransferRecord> existing = transferRepository.findByIdempotencyKey(key);
+            if (existing.isPresent()) {
+                TransferRecord prev = existing.get();
+                if (!prev.getSourceAccountId().equals(request.sourceAccountId())
+                        || !prev.getTargetAccountId().equals(request.targetAccountId())
+                        || prev.getAmount().compareTo(amount) != 0
+                        || !prev.getCurrency().equals(request.currency())) {
+                    throw new TransactionRuleException(Violation.IDEMPOTENCY_CONFLICT,
+                            "Idempotency key already used with different transfer parameters");
+                }
+                if (prev.getStatus() == TransferStatus.COMPLETED) {
+                    return TransferResponse.from(prev);
+                }
+                throw new TransferCompensationException(prev.getStatus(),
+                        "Previous transfer attempt with this idempotency key ended in status " + prev.getStatus(), null);
+            }
+        }
+
+        AccountView source = fetchAccount(request.sourceAccountId());
+        AccountView target = fetchAccount(request.targetAccountId());
+        if (!source.isActive()) {
+            throw new TransactionRuleException(Violation.ACCOUNT_NOT_ACTIVE, "Source account is not active: " + source.id());
+        }
+        if (!target.isActive()) {
+            throw new TransactionRuleException(Violation.ACCOUNT_NOT_ACTIVE, "Target account is not active: " + target.id());
+        }
+        if (!source.currency().equals(request.currency()) || !target.currency().equals(request.currency())) {
+            throw new TransactionRuleException(Violation.CURRENCY_MISMATCH,
+                    "Transfer currency must match both source and target account currencies");
+        }
+        if (source.balance().compareTo(amount) < 0) {
+            throw new TransactionRuleException(Violation.INSUFFICIENT_FUNDS,
+                    "Insufficient funds on source account " + source.id());
+        }
+
+        Instant now = Instant.now(clock);
+        callAccountService(() -> accountClient.debit(source.id(), new AmountPayload(amount)));
+
+        try {
+            callAccountService(() -> accountClient.credit(target.id(), new AmountPayload(amount)));
+        } catch (RuntimeException creditFailure) {
+            log.warn("Credit failed on target account {} after debiting source {}; triggering Saga compensation",
+                    target.id(), source.id(), creditFailure);
+            TransferStatus status = compensateSource(source.id(), amount);
+            if (transferRepository != null) {
+                transferRepository.save(new TransferRecord(key, source.id(), target.id(), amount,
+                        request.currency(), status, null, creditFailure.getMessage(), now));
+            }
+            throw new TransferCompensationException(status,
+                    status == TransferStatus.COMPENSATED
+                            ? "Credit failed; source account was automatically refunded (Saga compensated)"
+                            : "Credit failed and automatic refund failed; manual reconciliation required",
+                    creditFailure);
+        }
+
+        Transaction debitTx = repository.save(new Transaction(source.id(), amount, request.currency(),
+                "TRANSFER_OUT", "INTERNAL", now));
+        repository.save(new Transaction(target.id(), amount, request.currency(),
+                "TRANSFER_IN", "INTERNAL", now));
+
+        TransferRecord record = new TransferRecord(key, source.id(), target.id(), amount,
+                request.currency(), TransferStatus.COMPLETED, debitTx.getId(), null, now);
+        if (transferRepository != null) {
+            record = transferRepository.save(record);
+        }
+        return TransferResponse.from(record);
+    }
+
+    private TransferStatus compensateSource(UUID sourceId, BigDecimal amount) {
+        try {
+            callAccountService(() -> accountClient.credit(sourceId, new AmountPayload(amount)));
+            return TransferStatus.COMPENSATED;
+        } catch (RuntimeException compensationError) {
+            log.error("CRITICAL: Saga compensation failed for account {} amount {}", sourceId, amount, compensationError);
+            return TransferStatus.COMPENSATION_REQUIRED;
+        }
     }
 
     @Transactional(readOnly = true)
