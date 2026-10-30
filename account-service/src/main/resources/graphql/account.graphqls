@@ -1,0 +1,35 @@
+scalar BigDecimal
+
+enum AccountStatus {
+    ACTIVE
+    BLOCKED
+}
+
+type Account {
+    id: ID!
+    customerReference: String!
+    status: AccountStatus!
+    currency: String!
+    balance: BigDecimal!
+}
+
+input CreateAccountInput {
+    customerReference: String!
+    currency: String!
+    initialBalance: BigDecimal!
+}
+
+type Query {
+    accounts: [Account!]!
+    account(id: ID!): Account
+    accountBalance(id: ID!): BigDecimal!
+}
+
+type Mutation {
+    createAccount(input: CreateAccountInput!): Account!
+    changeAccountStatus(id: ID!, status: AccountStatus!): Account!
+    blockAccount(id: ID!): Account!
+    unblockAccount(id: ID!): Account!
+    debitAccount(id: ID!, amount: BigDecimal!): Account!
+    creditAccount(id: ID!, amount: BigDecimal!): Account!
+}
