@@ -1,3 +1,32 @@
+server:
+  port: 8084
+
 spring:
   application:
     name: chat-bot-service
+  config:
+    import: optional:configserver:${CONFIG_SERVER_URL:http://localhost:8888}
+  ai:
+    ollama:
+      base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
+      chat:
+        options:
+          model: ${OLLAMA_MODEL:llama3.2:latest}
+          temperature: 0.1
+
+mcp:
+  servers:
+    account-service-url: ${ACCOUNT_MCP_URL:http://localhost:8081}
+    transaction-service-url: ${TRANSACTION_MCP_URL:http://localhost:8082}
+
+integrations:
+  telegram:
+    bot-token: ${TELEGRAM_BOT_TOKEN:}
+  discord:
+    webhook-url: ${DISCORD_WEBHOOK_URL:}
+
+eureka:
+  client:
+    enabled: ${EUREKA_ENABLED:false}
+    service-url:
+      defaultZone: ${EUREKA_SERVER_URL:http://localhost:8761/eureka/}
