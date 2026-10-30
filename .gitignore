@@ -1,0 +1,22 @@
+# Maven / Java
+target/
+*.class
+*.log
+# IDE
+.idea/
+*.iml
+.vscode/
+# Node / Angular
+node_modules/
+angular-client/dist/
+angular-client/.angular/
+# Python
+__pycache__/
+.venv/
+.ipynb_checkpoints/
+# Secrets et environnement local (ne jamais commiter)
+.env
+*.env
+!.env.example
+*.pem
+*.key
