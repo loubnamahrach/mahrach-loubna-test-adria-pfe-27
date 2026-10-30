@@ -12,6 +12,15 @@ spring:
     hibernate:
       ddl-auto: update
     open-in-view: false
+  ai:
+    mcp:
+      server:
+        name: transaction-service-mcp
+        version: 1.0.0
+        protocol: STREAMABLE
+  graphql:
+    graphiql:
+      enabled: true
 
 bank:
   transaction:

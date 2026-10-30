@@ -1,0 +1,56 @@
+scalar BigDecimal
+
+enum TransferStatus {
+    COMPLETED
+    COMPENSATED
+    COMPENSATION_REQUIRED
+}
+
+type Transaction {
+    id: ID!
+    accountId: ID!
+    amount: BigDecimal!
+    currency: String!
+    merchantCategory: String!
+    country: String!
+    createdAt: String!
+}
+
+type Transfer {
+    id: ID!
+    idempotencyKey: String!
+    sourceAccountId: ID!
+    targetAccountId: ID!
+    amount: BigDecimal!
+    currency: String!
+    status: TransferStatus!
+    debitTransactionId: ID
+    createdAt: String!
+}
+
+input CreateTransactionInput {
+    accountId: ID!
+    amount: BigDecimal!
+    currency: String!
+    merchantCategory: String!
+    country: String!
+}
+
+input TransferInput {
+    sourceAccountId: ID!
+    targetAccountId: ID!
+    amount: BigDecimal!
+    currency: String!
+    idempotencyKey: String
+}
+
+type Query {
+    transactions: [Transaction!]!
+    transaction(id: ID!): Transaction
+    transactionsByAccount(accountId: ID!): [Transaction!]!
+}
+
+type Mutation {
+    recordTransaction(input: CreateTransactionInput!): Transaction!
+    transferFunds(input: TransferInput!): Transfer!
+}
